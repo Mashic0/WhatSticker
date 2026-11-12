@@ -29,7 +29,10 @@ import android.view.*
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.Toast
+import android.graphics.drawable.AnimatedImageDrawable
+import androidx.annotation.RequiresApi
 import androidx.core.app.NotificationCompat
+import com.whatsticker.app.util.inspectAnimatedWebp
 import com.whatsticker.app.MainActivity
 import com.whatsticker.app.R
 import com.whatsticker.app.data.local.WhatStickerDatabase
@@ -974,6 +977,23 @@ class FloatingCaptureService : Service() {
                 bytes,
                 "animated"
             )
+            val inspection = inspectAnimatedWebp(bytes)
+            val decodeCheck = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                decodeAnimatedWebp(savedFile)
+            } else {
+                DecodeCheck.NOT_APPLICABLE
+            }
+            if (saveDisposition(inspection, decodeCheck) == SaveDisposition.DISCARD) {
+                // Only the file just created is removed; a failed delete must not break cleanup.
+                try {
+                    savedFile.delete()
+                } catch (e: Exception) {
+                    // Ignored on purpose.
+                }
+                savedFile = null
+                cleanupAfterGif("No se pudo generar un GIF con movimiento")
+                return
+            }
             val db = WhatStickerDatabase.getInstance(this@FloatingCaptureService)
             db.stickerDao().insertSticker(
                 CapturedSticker(
@@ -991,6 +1011,15 @@ class FloatingCaptureService : Service() {
             cleanupAfterGif("No se pudo guardar el GIF")
         }
     }
+
+    @RequiresApi(Build.VERSION_CODES.P)
+    private fun decodeAnimatedWebp(file: File): DecodeCheck =
+        try {
+            val drawable = ImageDecoder.decodeDrawable(ImageDecoder.createSource(file))
+            if (drawable is AnimatedImageDrawable) DecodeCheck.CONFIRMED_ANIMATED else DecodeCheck.FAILED
+        } catch (e: Exception) {
+            DecodeCheck.FAILED
+        }
 
     private suspend fun cleanupAfterGif(message: String) {
         withContext(Dispatchers.Main) {
