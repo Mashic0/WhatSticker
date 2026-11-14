@@ -28,9 +28,12 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.whatsticker.app.data.local.WhatStickerDatabase
 import com.whatsticker.app.data.model.CapturedSticker
+import com.whatsticker.app.ui.components.AnimatedStickerPreview
+import com.whatsticker.app.ui.components.AnimatedStickerThumbnail
 import com.whatsticker.app.ui.theme.WhatsAppGreen
 import com.whatsticker.app.util.ImageUtils
 import com.whatsticker.app.util.WhatsAppStickerUtil
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -53,6 +56,18 @@ fun PackDetailScreen(
     var showAddFromUnassignedDialog by remember { mutableStateOf(false) }
     var showDeletePackConfirm by remember { mutableStateOf(false) }
     var selectedStickerForAction by remember { mutableStateOf<CapturedSticker?>(null) }
+    var previewStop by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var previewGone by remember { mutableStateOf<CompletableDeferred<Unit>?>(null) }
+
+    // Single exit path of the sticker dialog: stops the decoder, then completes once the dialog content is disposed
+    fun closeStickerDialog(): CompletableDeferred<Unit> {
+        val gone = CompletableDeferred<Unit>()
+        previewGone = gone
+        previewStop?.invoke()
+        previewStop = null
+        selectedStickerForAction = null
+        return gone
+    }
 
     // Importar imagen directamente al paquete
     val galleryLauncher = rememberLauncherForActivityResult(
@@ -263,14 +278,24 @@ fun PackDetailScreen(
                                 .clickable { selectedStickerForAction = sticker }
                         ) {
                             Box(modifier = Modifier.fillMaxSize()) {
-                                AsyncImage(
-                                    model = File(sticker.filePath),
-                                    contentDescription = "Sticker",
-                                    contentScale = ContentScale.Fit,
-                                    modifier = Modifier
-                                        .fillMaxSize()
-                                        .padding(8.dp)
-                                )
+                                if (sticker.isAnimated) {
+                                    AnimatedStickerThumbnail(
+                                        filePath = sticker.filePath,
+                                        accessibilityDescription = "Sticker animado",
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(8.dp)
+                                    )
+                                } else {
+                                    AsyncImage(
+                                        model = File(sticker.filePath),
+                                        contentDescription = "Sticker",
+                                        contentScale = ContentScale.Fit,
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(8.dp)
+                                    )
+                                }
 
                                 IconButton(
                                     onClick = { selectedStickerForAction = sticker },
@@ -329,11 +354,19 @@ fun PackDetailScreen(
                                             }
                                         }
                                 ) {
-                                    AsyncImage(
-                                        model = File(sticker.filePath),
-                                        contentDescription = null,
-                                        modifier = Modifier.fillMaxSize().padding(4.dp)
-                                    )
+                                    if (sticker.isAnimated) {
+                                        AnimatedStickerThumbnail(
+                                            filePath = sticker.filePath,
+                                            accessibilityDescription = "Sticker animado",
+                                            modifier = Modifier.fillMaxSize().padding(4.dp)
+                                        )
+                                    } else {
+                                        AsyncImage(
+                                            model = File(sticker.filePath),
+                                            contentDescription = null,
+                                            modifier = Modifier.fillMaxSize().padding(4.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -352,33 +385,48 @@ fun PackDetailScreen(
     // Modal de acción sobre un sticker del paquete
     selectedStickerForAction?.let { sticker ->
         AlertDialog(
-            onDismissRequest = { selectedStickerForAction = null },
+            onDismissRequest = { closeStickerDialog() },
             title = { Text("Opciones del Sticker") },
             text = {
+                DisposableEffect(Unit) {
+                    onDispose { previewGone?.complete(Unit) }
+                }
                 Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Box(
-                        modifier = Modifier
-                            .size(160.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MaterialTheme.colorScheme.surfaceVariant),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        AsyncImage(
-                            model = File(sticker.filePath),
-                            contentDescription = null,
-                            modifier = Modifier.fillMaxSize().padding(8.dp)
-                        )
+                    if (sticker.isAnimated) {
+                        // The component draws its own 200 dp container plus the "GIF animado" badge
+                        key(sticker.id) {
+                            AnimatedStickerPreview(
+                                filePath = sticker.filePath,
+                                accessibilityDescription = "Sticker animado",
+                                onStopReady = { previewStop = it }
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(160.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            AsyncImage(
+                                model = File(sticker.filePath),
+                                contentDescription = null,
+                                modifier = Modifier.fillMaxSize().padding(8.dp)
+                            )
+                        }
                     }
                 }
             },
             confirmButton = {
                 TextButton(
                     onClick = {
+                        val gone = closeStickerDialog()
                         scope.launch(Dispatchers.IO) {
+                            gone.await()
                             // Devolver a capturas sin asignar
                             db.stickerDao().unassignSticker(sticker.id)
                             withContext(Dispatchers.Main) {
-                                selectedStickerForAction = null
                                 Toast.makeText(context, "Sticker devuelto a capturas sin asignar", Toast.LENGTH_SHORT).show()
                             }
                         }
@@ -390,11 +438,12 @@ fun PackDetailScreen(
             dismissButton = {
                 TextButton(
                     onClick = {
+                        val gone = closeStickerDialog()
                         scope.launch(Dispatchers.IO) {
+                            gone.await()
                             File(sticker.filePath).delete()
                             db.stickerDao().deleteSticker(sticker)
                             withContext(Dispatchers.Main) {
-                                selectedStickerForAction = null
                                 Toast.makeText(context, "Sticker eliminado", Toast.LENGTH_SHORT).show()
                             }
                         }
