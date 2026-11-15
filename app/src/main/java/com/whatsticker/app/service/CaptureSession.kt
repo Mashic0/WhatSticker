@@ -9,5 +9,6 @@ enum class CaptureType {
 
 data class CaptureSession(
     val type: CaptureType,
+    /** Final crop rectangle in captured-image pixel coordinates only (already converted and clamped). */
     val area: Rect
 )

@@ -691,25 +691,67 @@ class FloatingCaptureService : Service() {
             PixelFormat.TRANSLUCENT
         )
 
-        val cropView = CropOverlaySelectionView(this, currentScreenSize) { selectedArea ->
-            removeCropOverlay()
-            if (selectedArea != null) {
-                pendingCaptureType = null
-                val session = CaptureSession(type = type, area = selectedArea)
-                pendingSession = session
-                isSessionUiActive = false
-                if (type == CaptureType.STATIC) {
-                    startStaticCapture(session)
-                } else {
-                    startGifRecording(session)
+        val cropView = CropOverlaySelectionView(this, currentScreenSize) { result ->
+            when (result) {
+                is CropSelectionResult.Confirmed -> {
+                    val liveMetrics = DisplayMetrics()
+                    @Suppress("DEPRECATION")
+                    windowManager.defaultDisplay.getRealMetrics(liveMetrics)
+                    val liveScreenSize = IntSize(liveMetrics.widthPixels, liveMetrics.heightPixels)
+                    if (screenWidth <= 0 || screenHeight <= 0 ||
+                        !isValidSurfaceGeometry(
+                            result.surfaceOriginOnScreen,
+                            result.surfaceSize,
+                            liveScreenSize
+                        )
+                    ) {
+                        handleUnavailableGeometry()
+                        return@CropOverlaySelectionView
+                    }
+                    val conversion = toCaptureRect(
+                        visible = result.localRect,
+                        surfaceOriginOnScreen = result.surfaceOriginOnScreen,
+                        screenSize = liveScreenSize,
+                        imageSize = IntSize(screenWidth, screenHeight)
+                    )
+                    if (conversion is SelectionResult.InvalidGeometry) {
+                        handleUnavailableGeometry()
+                    } else if (conversion is SelectionResult.Valid) {
+                        removeCropOverlay()
+                        val rect = conversion.rect
+                        pendingCaptureType = null
+                        val session = CaptureSession(
+                            type = type,
+                            area = android.graphics.Rect(rect.left, rect.top, rect.right, rect.bottom)
+                        )
+                        pendingSession = session
+                        isSessionUiActive = false
+                        if (type == CaptureType.STATIC) {
+                            startStaticCapture(session)
+                        } else {
+                            startGifRecording(session)
+                        }
+                    } else {
+                        cancelAreaSelection("El área seleccionada es demasiado pequeña")
+                    }
                 }
-            } else {
-                cancelAreaSelection("Selección de área cancelada")
+                is CropSelectionResult.GeometryUnavailable -> handleUnavailableGeometry()
+                is CropSelectionResult.Canceled -> cancelAreaSelection("Selección de área cancelada")
             }
         }
 
         cropOverlayView = cropView
         windowManager.addView(cropView, overlayParams)
+    }
+
+    private fun handleUnavailableGeometry() {
+        // Keep the selector attached so the user can retry; drop it only if orphaned.
+        if (cropOverlayView?.isAttachedToWindow != true) removeCropOverlay()
+        Toast.makeText(
+            this,
+            "No se pudo determinar el área. Inténtalo de nuevo",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     private fun removeCropOverlay() {

@@ -11,7 +11,10 @@ data class IntRect(val left: Int, val top: Int, val right: Int, val bottom: Int)
 
 sealed class SelectionResult {
     data class Valid(val rect: IntRect) : SelectionResult()
+    /** Final selection is smaller than the 8x8 px minimum. */
     data object Invalid : SelectionResult()
+    /** Input geometry (screen, image, scales or rectangle) is unusable. */
+    data object InvalidGeometry : SelectionResult()
 }
 
 fun normalizeSelection(rectangle: IntRect, screenSize: IntSize): SelectionResult {
@@ -39,6 +42,80 @@ fun normalizeSelection(rectangle: IntRect, screenSize: IntSize): SelectionResult
     }
 
     return SelectionResult.Valid(normalized)
+}
+
+data class IntPoint(val x: Int, val y: Int)
+
+/**
+ * Converts a rectangle in surface-local coordinates into captured-image coordinates.
+ *
+ * Each edge: physical = surfaceOriginOnScreen + local * surfaceScale, then
+ * image = physical * imageSize / screenSize (per axis). Edges are rounded to the nearest
+ * integer, with exact .5 ties rounded away from zero (see [roundHalfAwayFromZero]).
+ *
+ * The output is in captured-image coordinates. Partial intersection with
+ * [0, imageWidth] x [0, imageHeight] is intentional: the available part is kept and the
+ * result is Invalid only when it ends up smaller than 8x8 px.
+ */
+fun toCaptureRect(
+    visible: IntRect,
+    surfaceOriginOnScreen: IntPoint,
+    screenSize: IntSize,
+    imageSize: IntSize,
+    surfaceScaleX: Float = 1f,
+    surfaceScaleY: Float = 1f
+): SelectionResult {
+    if (screenSize.width <= 0 || screenSize.height <= 0) return SelectionResult.InvalidGeometry
+    if (imageSize.width <= 0 || imageSize.height <= 0) return SelectionResult.InvalidGeometry
+    if (!surfaceScaleX.isFinite() || surfaceScaleX <= 0f) return SelectionResult.InvalidGeometry
+    if (!surfaceScaleY.isFinite() || surfaceScaleY <= 0f) return SelectionResult.InvalidGeometry
+    if (visible.right < visible.left || visible.bottom < visible.top) {
+        return SelectionResult.InvalidGeometry
+    }
+
+    val ratioX = imageSize.width.toDouble() / screenSize.width
+    val ratioY = imageSize.height.toDouble() / screenSize.height
+
+    fun edge(origin: Int, local: Int, surfaceScale: Float, ratio: Double, max: Int): Int {
+        val physical = origin + local * surfaceScale.toDouble()
+        return roundHalfAwayFromZero(physical * ratio).coerceIn(0L, max.toLong()).toInt()
+    }
+
+    val rect = IntRect(
+        left = edge(surfaceOriginOnScreen.x, visible.left, surfaceScaleX, ratioX, imageSize.width),
+        top = edge(surfaceOriginOnScreen.y, visible.top, surfaceScaleY, ratioY, imageSize.height),
+        right = edge(surfaceOriginOnScreen.x, visible.right, surfaceScaleX, ratioX, imageSize.width),
+        bottom = edge(surfaceOriginOnScreen.y, visible.bottom, surfaceScaleY, ratioY, imageSize.height)
+    )
+
+    if (rect.width < MIN_SELECTION_SIZE_PX || rect.height < MIN_SELECTION_SIZE_PX) {
+        return SelectionResult.Invalid
+    }
+    return SelectionResult.Valid(rect)
+}
+
+/**
+ * Validates the surface contract: the overlay view uses MATCH_PARENT with no layout scaling,
+ * so its local coordinates are already physical pixels and the surface scale is 1 (the scale
+ * parameters of [toCaptureRect] remain for the pure rule and its tests). The surface may be
+ * offset (e.g. by a display cutout) but must lie fully inside the screen.
+ */
+fun isValidSurfaceGeometry(
+    surfaceOriginOnScreen: IntPoint,
+    surfaceSize: IntSize,
+    screenSize: IntSize
+): Boolean {
+    if (screenSize.width <= 0 || screenSize.height <= 0) return false
+    if (surfaceSize.width <= 0 || surfaceSize.height <= 0) return false
+    if (surfaceSize.width > screenSize.width || surfaceSize.height > screenSize.height) return false
+    return surfaceOriginOnScreen.x in 0..(screenSize.width - surfaceSize.width) &&
+        surfaceOriginOnScreen.y in 0..(screenSize.height - surfaceSize.height)
+}
+
+// Nearest integer; exact .5 ties move away from zero (kotlin.math.round would tie to even).
+private fun roundHalfAwayFromZero(value: Double): Long {
+    val magnitude = kotlin.math.floor(kotlin.math.abs(value) + 0.5).toLong()
+    return if (value < 0) -magnitude else magnitude
 }
 
 data class FrameSchedule(

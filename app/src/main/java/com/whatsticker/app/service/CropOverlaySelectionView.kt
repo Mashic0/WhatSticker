@@ -15,7 +15,7 @@ import kotlin.math.min
 class CropOverlaySelectionView(
     context: Context,
     private val screenSize: IntSize,
-    private val onSelectionResult: (Rect?) -> Unit
+    private val onSelectionResult: (CropSelectionResult) -> Unit
 ) : FrameLayout(context) {
 
     private var cropRect: RectF? = null
@@ -76,7 +76,7 @@ class CropOverlaySelectionView(
             text = "Cancelar"
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.argb(160, 80, 80, 80))
-            setOnClickListener { onSelectionResult(null) }
+            setOnClickListener { onSelectionResult(CropSelectionResult.Canceled) }
         }
 
         val spacer = View(context).apply {
@@ -180,36 +180,49 @@ class CropOverlaySelectionView(
         )
     }
 
+    /**
+     * Measures the surface geometry at confirmation time only. The minimum size is
+     * evaluated later on the final capture rectangle (toCaptureRect), not here.
+     */
     private fun confirmSelection() {
         val rect = cropRect
-        if (rect == null || rect.width() <= 10 || rect.height() <= 10) {
-            onSelectionResult(null)
+        if (rect == null || !isAttachedToWindow || width <= 0 || height <= 0) {
+            onSelectionResult(CropSelectionResult.GeometryUnavailable)
             return
         }
 
-        val normalized = normalizeSelection(
-            rectangle = IntRect(
-                left = rect.left.toInt(),
-                top = rect.top.toInt(),
-                right = rect.right.toInt(),
-                bottom = rect.bottom.toInt()
-            ),
-            screenSize = screenSize
+        // Gestures already produce ordered rectangles; an inverted one is treated as invalid.
+        val localRect = IntRect(
+            left = rect.left.toInt(),
+            top = rect.top.toInt(),
+            right = rect.right.toInt(),
+            bottom = rect.bottom.toInt()
         )
-
-        when (normalized) {
-            is SelectionResult.Valid -> {
-                onSelectionResult(
-                    Rect(
-                        normalized.rect.left,
-                        normalized.rect.top,
-                        normalized.rect.right,
-                        normalized.rect.bottom
-                    )
-                )
-            }
-
-            SelectionResult.Invalid -> onSelectionResult(null)
+        if (localRect.right <= localRect.left || localRect.bottom <= localRect.top) {
+            onSelectionResult(CropSelectionResult.GeometryUnavailable)
+            return
         }
+
+        val location = IntArray(2)
+        getLocationOnScreen(location)
+
+        onSelectionResult(
+            CropSelectionResult.Confirmed(
+                localRect = localRect,
+                surfaceOriginOnScreen = IntPoint(location[0], location[1]),
+                surfaceSize = IntSize(width, height)
+            )
+        )
     }
+}
+
+sealed class CropSelectionResult {
+    data class Confirmed(
+        val localRect: IntRect,
+        val surfaceOriginOnScreen: IntPoint,
+        val surfaceSize: IntSize
+    ) : CropSelectionResult()
+
+    data object Canceled : CropSelectionResult()
+    data object GeometryUnavailable : CropSelectionResult()
 }
